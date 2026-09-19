@@ -5,16 +5,26 @@ import android.view.accessibility.AccessibilityNodeInfo
 
 /** Converts the live accessibility tree into a bounded, serializable UI snapshot. */
 class AccessibilitySnapshotter(
-    private val maxNodes: Int = 500
+    private val maxNodes: Int = 1000
 ) {
+    init {
+        require(maxNodes > 0) { "maxNodes must be positive" }
+    }
+
     fun capture(root: AccessibilityNodeInfo?): UiSnapshot? {
         if (root == null) return null
 
-        val nodes = ArrayList<UiNode>(minOf(maxNodes, 64))
+        val nodes = ArrayList<UiNode>(minOf(maxNodes, 128))
         val queue = ArrayDeque<Pair<AccessibilityNodeInfo, Int?>>()
         queue.add(root to null)
+        var truncated = false
 
-        while (queue.isNotEmpty() && nodes.size < maxNodes) {
+        while (queue.isNotEmpty()) {
+            if (nodes.size >= maxNodes) {
+                truncated = true
+                break
+            }
+
             val (node, parentIndex) = queue.removeFirst()
             val index = nodes.size
             val bounds = Rect()
@@ -42,7 +52,7 @@ class AccessibilitySnapshotter(
             )
 
             for (i in 0 until node.childCount) {
-                node.getChild(i)?.let { queue.add(it to index) }
+                node.getChild(i)?.let { queue.addLast(it to index) }
             }
         }
 
@@ -50,7 +60,8 @@ class AccessibilitySnapshotter(
             packageName = root.packageName?.toString(),
             className = root.className?.toString(),
             windowTitle = root.window?.title?.toString(),
-            nodes = nodes
+            nodes = nodes,
+            truncated = truncated
         )
     }
 }
