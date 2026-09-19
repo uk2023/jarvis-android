@@ -5,7 +5,8 @@ data class UiSnapshot(
     val packageName: String?,
     val className: String?,
     val windowTitle: String?,
-    val nodes: List<UiNode>
+    val nodes: List<UiNode>,
+    val truncated: Boolean = false
 )
 
 data class UiNode(
@@ -27,4 +28,7 @@ data class UiNode(
     val focused: Boolean,
     val checkable: Boolean,
     val checked: Boolean
-)
+) {
+    val hasSemanticLabel: Boolean
+        get() = !text.isNullOrBlank() || !contentDescription.isNullOrBlank() || !resourceId.isNullOrBlank()
+}
