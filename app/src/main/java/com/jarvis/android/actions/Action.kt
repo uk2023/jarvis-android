@@ -38,10 +38,33 @@ sealed interface Action {
         val text: String
     ) : Action
 
+    data class SemanticClick(
+        override val id: String,
+        val target: UiTarget
+    ) : Action
+
+    data class SemanticScroll(
+        override val id: String,
+        val target: UiTarget,
+        val direction: ScrollDirection = ScrollDirection.FORWARD
+    ) : Action
+
     data class SystemKey(
         override val id: String,
         val key: Key
     ) : Action
 
     enum class Key { BACK, HOME, RECENTS }
+    enum class ScrollDirection { FORWARD, BACKWARD }
 }
+
+/** Semantic selector for an Android accessibility node. Fields are ANDed. */
+data class UiTarget(
+    val text: String? = null,
+    val contentDescription: String? = null,
+    val resourceId: String? = null,
+    val className: String? = null,
+    val clickable: Boolean? = null,
+    val scrollable: Boolean? = null,
+    val exact: Boolean = true
+)
