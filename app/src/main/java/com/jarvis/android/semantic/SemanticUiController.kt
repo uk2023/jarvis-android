@@ -12,53 +12,97 @@ import com.jarvis.android.gestures.HumanGestureTiming
 class SemanticUiController(private val service: JarvisAccessibilityService) {
     fun execute(action: Action): ActionResult {
         val start = System.currentTimeMillis()
-        val root = service.rootInActiveWindow ?: return ActionResult(action.id, false, "no_active_window")
-        val node = when (action) {
-            is Action.SemanticClick -> find(root, action.target)
-            is Action.SemanticScroll -> find(root, action.target)
-            else -> null
+        val root = service.rootInActiveWindow
+            ?: return result(action, start, false, "no_active_window", true, "none")
+
+        val target = when (action) {
+            is Action.SemanticClick -> action.target
+            is Action.SemanticScroll -> action.target
+            else -> return result(action, start, false, "unsupported_semantic_action", false, "none")
         }
+        val node = resolve(root, target)
+            ?: return result(action, start, false, "semantic_target_not_found", true, "semantic")
+
         val ok = when (action) {
             is Action.SemanticClick -> click(node)
             is Action.SemanticScroll -> scroll(node, action.direction)
             else -> false
         }
-        return ActionResult(action.id, ok, if (ok) "executed_semantically" else "semantic_target_not_actionable", System.currentTimeMillis() - start)
+        return result(
+            action,
+            start,
+            ok,
+            if (ok) "executed_semantically" else "semantic_target_not_actionable",
+            !ok,
+            if (ok) "semantic" else "semantic_failed"
+        )
     }
 
-    private fun click(node: AccessibilityNodeInfo?): Boolean {
-        if (node == null) return false
+    private fun result(action: Action, start: Long, ok: Boolean, message: String, retryable: Boolean, strategy: String) =
+        ActionResult(action.id, ok, message, System.currentTimeMillis() - start, strategy, retryable)
+
+    private fun click(node: AccessibilityNodeInfo): Boolean {
+        if (!node.isVisibleToUser || !node.isEnabled) return false
         if (node.isClickable && node.performAction(AccessibilityNodeInfo.ACTION_CLICK)) return true
-        if (node.parent?.isClickable == true) return node.parent.performAction(AccessibilityNodeInfo.ACTION_CLICK)
+        var parent = node.parent
+        repeat(4) {
+            if (parent == null) return@repeat
+            if (parent.isVisibleToUser && parent.isEnabled && parent.isClickable &&
+                parent.performAction(AccessibilityNodeInfo.ACTION_CLICK)) return true
+            parent = parent.parent
+        }
         val r = Rect()
         node.getBoundsInScreen(r)
-        return if (!r.isEmpty) service.execute(Action.Tap("semantic-fallback", r.centerX().toFloat(), r.centerY().toFloat())).success else false
+        return if (!r.isEmpty) {
+            service.execute(Action.Tap("semantic-fallback-${actionSafeId(node)}", r.centerX().toFloat(), r.centerY().toFloat())).success
+        } else false
     }
 
-    private fun scroll(node: AccessibilityNodeInfo?, direction: Action.ScrollDirection): Boolean {
-        if (node == null) return false
-        val nativeAction = if (direction == Action.ScrollDirection.FORWARD) AccessibilityNodeInfo.ACTION_SCROLL_FORWARD else AccessibilityNodeInfo.ACTION_SCROLL_BACKWARD
+    private fun scroll(node: AccessibilityNodeInfo, direction: Action.ScrollDirection): Boolean {
+        if (!node.isVisibleToUser || !node.isEnabled) return false
+        val nativeAction = if (direction == Action.ScrollDirection.FORWARD)
+            AccessibilityNodeInfo.ACTION_SCROLL_FORWARD else AccessibilityNodeInfo.ACTION_SCROLL_BACKWARD
         if (node.isScrollable && node.performAction(nativeAction)) return true
+
         val r = Rect()
         node.getBoundsInScreen(r)
         if (r.isEmpty) return false
         val y1 = if (direction == Action.ScrollDirection.FORWARD) r.bottom - 8f else r.top + 8f
         val y2 = if (direction == Action.ScrollDirection.FORWARD) r.top + 8f else r.bottom - 8f
-        return service.execute(Action.Swipe("semantic-scroll-fallback", r.centerX().toFloat(), y1, r.centerX().toFloat(), y2, HumanGestureTiming.scrollMs())).success
+        if (y1 <= y2) return false
+        return service.execute(Action.Swipe("semantic-scroll-${actionSafeId(node)}", r.centerX().toFloat(), y1,
+            r.centerX().toFloat(), y2, HumanGestureTiming.scrollMs())).success
     }
 
-    private fun find(root: AccessibilityNodeInfo, target: UiTarget): AccessibilityNodeInfo? {
+    /** Scores candidates instead of trusting the first accessibility node encountered. */
+    private fun resolve(root: AccessibilityNodeInfo, target: UiTarget): AccessibilityNodeInfo? {
+        val candidates = ArrayList<Pair<AccessibilityNodeInfo, Int>>()
         val queue = ArrayDeque<AccessibilityNodeInfo>()
         queue.add(root)
         while (queue.isNotEmpty()) {
             val node = queue.removeFirst()
-            if (matches(node, target)) return node
+            score(node, target)?.let { candidates += node to it }
             for (i in 0 until node.childCount) node.getChild(i)?.let(queue::addLast)
         }
-        return null
+        return candidates.maxByOrNull { it.second }?.first
     }
 
-    private fun matches(node: AccessibilityNodeInfo, target: UiTarget): Boolean {
+    private fun score(node: AccessibilityNodeInfo, target: UiTarget): Int? {
+        if (!matchesRequired(node, target)) return null
+        var score = 0
+        if (node.isVisibleToUser) score += 30 else return null
+        if (node.isEnabled) score += 15 else return null
+        if (target.text != null) score += 30
+        if (target.contentDescription != null) score += 30
+        if (target.resourceId != null) score += 40
+        if (target.className != null) score += 10
+        if (target.clickable != null) score += 5
+        if (target.scrollable != null) score += 5
+        if (node.isFocused) score += 3
+        return score
+    }
+
+    private fun matchesRequired(node: AccessibilityNodeInfo, target: UiTarget): Boolean {
         fun match(value: CharSequence?, expected: String?): Boolean {
             if (expected == null) return true
             val actual = value?.toString() ?: return false
@@ -69,4 +113,7 @@ class SemanticUiController(private val service: JarvisAccessibilityService) {
             (target.clickable == null || node.isClickable == target.clickable) &&
             (target.scrollable == null || node.isScrollable == target.scrollable)
     }
+
+    private fun actionSafeId(node: AccessibilityNodeInfo): String =
+        Integer.toHexString(System.identityHashCode(node))
 }
