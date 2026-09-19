@@ -14,7 +14,6 @@ class SemanticUiController(private val service: JarvisAccessibilityService) {
         val start = System.currentTimeMillis()
         val root = service.rootInActiveWindow
             ?: return result(action, start, false, "no_active_window", true, "none")
-
         val target = when (action) {
             is Action.SemanticClick -> action.target
             is Action.SemanticScroll -> action.target
@@ -22,20 +21,14 @@ class SemanticUiController(private val service: JarvisAccessibilityService) {
         }
         val node = resolve(root, target)
             ?: return result(action, start, false, "semantic_target_not_found", true, "semantic")
-
         val ok = when (action) {
             is Action.SemanticClick -> click(node)
             is Action.SemanticScroll -> scroll(node, action.direction)
             else -> false
         }
-        return result(
-            action,
-            start,
-            ok,
+        return result(action, start, ok,
             if (ok) "executed_semantically" else "semantic_target_not_actionable",
-            !ok,
-            if (ok) "semantic" else "semantic_failed"
-        )
+            !ok, if (ok) "semantic" else "semantic_failed")
     }
 
     private fun result(action: Action, start: Long, ok: Boolean, message: String, retryable: Boolean, strategy: String) =
@@ -53,9 +46,9 @@ class SemanticUiController(private val service: JarvisAccessibilityService) {
         }
         val r = Rect()
         node.getBoundsInScreen(r)
-        return if (!r.isEmpty) {
-            service.execute(Action.Tap("semantic-fallback-${actionSafeId(node)}", r.centerX().toFloat(), r.centerY().toFloat())).success
-        } else false
+        return if (!r.isEmpty) service.execute(
+            Action.Tap("semantic-fallback-${actionSafeId(node)}", r.centerX().toFloat(), r.centerY().toFloat())
+        ).success else false
     }
 
     private fun scroll(node: AccessibilityNodeInfo, direction: Action.ScrollDirection): Boolean {
@@ -66,12 +59,15 @@ class SemanticUiController(private val service: JarvisAccessibilityService) {
 
         val r = Rect()
         node.getBoundsInScreen(r)
-        if (r.isEmpty) return false
-        val y1 = if (direction == Action.ScrollDirection.FORWARD) r.bottom - 8f else r.top + 8f
-        val y2 = if (direction == Action.ScrollDirection.FORWARD) r.top + 8f else r.bottom - 8f
-        if (y1 <= y2) return false
-        return service.execute(Action.Swipe("semantic-scroll-${actionSafeId(node)}", r.centerX().toFloat(), y1,
-            r.centerX().toFloat(), y2, HumanGestureTiming.scrollMs())).success
+        if (r.isEmpty || r.width() <= 1 || r.height() <= 1) return false
+        val startY = if (direction == Action.ScrollDirection.FORWARD) r.bottom - 8f else r.top + 8f
+        val endY = if (direction == Action.ScrollDirection.FORWARD) r.top + 8f else r.bottom - 8f
+        if (startY == endY) return false
+        return service.execute(Action.Swipe(
+            "semantic-scroll-${actionSafeId(node)}",
+            r.centerX().toFloat(), startY, r.centerX().toFloat(), endY,
+            HumanGestureTiming.scrollMs()
+        )).success
     }
 
     /** Scores candidates instead of trusting the first accessibility node encountered. */
@@ -88,10 +84,8 @@ class SemanticUiController(private val service: JarvisAccessibilityService) {
     }
 
     private fun score(node: AccessibilityNodeInfo, target: UiTarget): Int? {
-        if (!matchesRequired(node, target)) return null
-        var score = 0
-        if (node.isVisibleToUser) score += 30 else return null
-        if (node.isEnabled) score += 15 else return null
+        if (!matchesRequired(node, target) || !node.isVisibleToUser || !node.isEnabled) return null
+        var score = 45
         if (target.text != null) score += 30
         if (target.contentDescription != null) score += 30
         if (target.resourceId != null) score += 40
