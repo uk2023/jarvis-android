@@ -9,14 +9,25 @@ import android.view.accessibility.AccessibilityNodeInfo
 import com.jarvis.android.actions.Action
 import com.jarvis.android.actions.ActionResult
 import com.jarvis.android.gestures.HumanGestureTiming
+import com.jarvis.android.semantic.SemanticUiController
 import java.util.concurrent.atomic.AtomicReference
 
 class JarvisAccessibilityService : AccessibilityService() {
-    override fun onServiceConnected() { instance.set(this) }
+    private lateinit var semanticUi: SemanticUiController
+
+    override fun onServiceConnected() {
+        instance.set(this)
+        semanticUi = SemanticUiController(this)
+    }
+
     override fun onAccessibilityEvent(event: AccessibilityEvent?) = Unit
     override fun onInterrupt() = Unit
 
     fun execute(action: Action): ActionResult {
+        if (action is Action.SemanticClick || action is Action.SemanticScroll) {
+            if (!::semanticUi.isInitialized) return ActionResult(action.id, false, "service_not_ready")
+            return semanticUi.execute(action)
+        }
         val start = System.currentTimeMillis()
         val ok = when (action) {
             is Action.Tap -> gesture(action.x, action.y, action.x, action.y, HumanGestureTiming.tapMs())
@@ -29,6 +40,7 @@ class JarvisAccessibilityService : AccessibilityService() {
                 Action.Key.HOME -> GLOBAL_ACTION_HOME
                 Action.Key.RECENTS -> GLOBAL_ACTION_RECENTS
             })
+            is Action.SemanticClick, is Action.SemanticScroll -> false
         }
         return ActionResult(action.id, ok, if (ok) "executed" else "execution_failed", System.currentTimeMillis() - start)
     }
