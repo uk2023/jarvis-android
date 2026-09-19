@@ -2,7 +2,6 @@ package com.jarvis.android.accessibility
 
 import android.accessibilityservice.AccessibilityService
 import android.accessibilityservice.GestureDescription
-import android.graphics.Path
 import android.os.Bundle
 import android.os.Handler
 import android.os.Looper
@@ -13,7 +12,6 @@ import com.jarvis.android.actions.ActionResult
 import com.jarvis.android.executor.ActionExecutionPolicy
 import com.jarvis.android.executor.ScreenStateFingerprint
 import com.jarvis.android.gestures.GestureBuilder
-import com.jarvis.android.gestures.HumanGestureTiming
 import com.jarvis.android.semantic.SemanticUiController
 import java.util.concurrent.CountDownLatch
 import java.util.concurrent.TimeUnit
@@ -44,32 +42,24 @@ class JarvisAccessibilityService : AccessibilityService() {
         var lastMessage = "execution_failed"
 
         for (attempt in 1..maxAttempts) {
-            val outcome = when (action) {
-                is Action.Tap -> dispatchGestureAwaited(
-                    GestureBuilder.line(action.x, action.y, action.x, action.y, policy.duration(action))
-                )
-                is Action.LongPress -> dispatchGestureAwaited(
-                    GestureBuilder.line(action.x, action.y, action.x, action.y, policy.duration(action))
-                )
-                is Action.Swipe -> dispatchGestureAwaited(
-                    GestureBuilder.interpolatedLine(
-                        action.startX, action.startY, action.endX, action.endY, policy.duration(action)
-                    )
-                )
-                is Action.Scroll -> dispatchGestureAwaited(
-                    GestureBuilder.interpolatedLine(
-                        action.x, action.y,
-                        action.x + action.deltaX, action.y + action.deltaY,
-                        policy.duration(action)
-                    )
-                )
+            val accepted = when (action) {
+                is Action.Tap -> dispatchGestureAwaited(GestureBuilder.line(action.x, action.y, action.x, action.y, policy.duration(action)))
+                is Action.LongPress -> dispatchGestureAwaited(GestureBuilder.line(action.x, action.y, action.x, action.y, policy.duration(action)))
+                is Action.Swipe -> dispatchGestureAwaited(GestureBuilder.interpolatedLine(action.startX, action.startY, action.endX, action.endY, policy.duration(action)))
+                is Action.Scroll -> dispatchGestureAwaited(GestureBuilder.interpolatedLine(action.x, action.y, action.x + action.deltaX, action.y + action.deltaY, policy.duration(action)))
                 is Action.TextInput -> dispatchTextInput(action.text)
                 is Action.SystemKey -> dispatchSystemKey(action.key)
                 is Action.SemanticClick, is Action.SemanticScroll -> false
             }
 
-            if (outcome) {
-                val verification = verifyAfterAction(action, before)
+            if (!accepted) {
+                lastMessage = "attempt_${attempt}_failed"
+                if (!policy.retryable(action) || attempt == maxAttempts) break
+                continue
+            }
+
+            val verification = verifyAfterAction(action, before)
+            if (verification.second != ActionResult.Verification.STALE_SCREEN) {
                 return ActionResult(
                     action.id,
                     true,
@@ -81,7 +71,8 @@ class JarvisAccessibilityService : AccessibilityService() {
                     verification.second
                 )
             }
-            lastMessage = "attempt_${attempt}_failed"
+
+            lastMessage = "stale_screen_after_attempt_$attempt"
             if (!policy.retryable(action) || attempt == maxAttempts) break
         }
 
@@ -93,37 +84,33 @@ class JarvisAccessibilityService : AccessibilityService() {
             strategyFor(action),
             policy.retryable(action),
             maxAttempts,
-            ActionResult.Verification.FAILED
+            ActionResult.Verification.STALE_SCREEN.takeIf { lastMessage.startsWith("stale_screen") }
+                ?: ActionResult.Verification.FAILED
         )
     }
 
     private fun dispatchGestureAwaited(gesture: GestureDescription): Boolean {
-        if (Looper.myLooper() == Looper.getMainLooper()) {
-            return dispatchGesture(gesture, null, null)
-        }
+        if (Looper.myLooper() == Looper.getMainLooper()) return dispatchGesture(gesture, null, null)
         val done = CountDownLatch(1)
-        val accepted = AtomicReference(false)
-        val callback = object : GestureResultCallback() {
+        val completed = AtomicReference(false)
+        val callback = object : AccessibilityService.GestureResultCallback() {
             override fun onCompleted(gestureDescription: GestureDescription?) {
-                accepted.set(true)
+                completed.set(true)
                 done.countDown()
             }
             override fun onCancelled(gestureDescription: GestureDescription?) {
-                accepted.set(false)
+                completed.set(false)
                 done.countDown()
             }
         }
-        val queued = dispatchGesture(gesture, callback, mainHandler)
-        if (!queued) return false
+        if (!dispatchGesture(gesture, callback, mainHandler)) return false
         done.await(2_000L, TimeUnit.MILLISECONDS)
-        return accepted.get()
+        return completed.get()
     }
 
     private fun dispatchTextInput(text: String): Boolean {
         val node = focusedEditable(rootInActiveWindow) ?: return false
-        val args = Bundle().apply {
-            putCharSequence(AccessibilityNodeInfo.ACTION_ARGUMENT_SET_TEXT_CHARSEQUENCE, text)
-        }
+        val args = Bundle().apply { putCharSequence(AccessibilityNodeInfo.ACTION_ARGUMENT_SET_TEXT_CHARSEQUENCE, text) }
         return node.performAction(AccessibilityNodeInfo.ACTION_SET_TEXT, args)
     }
 
@@ -134,16 +121,14 @@ class JarvisAccessibilityService : AccessibilityService() {
     })
 
     private fun verifyAfterAction(action: Action, before: Long): Pair<String, ActionResult.Verification> {
-        if (Looper.myLooper() == Looper.getMainLooper()) {
-            return "accepted_pending_verification" to ActionResult.Verification.ACCEPTED_PENDING_VERIFICATION
-        }
+        if (Looper.myLooper() == Looper.getMainLooper()) return "accepted_pending_verification" to ActionResult.Verification.ACCEPTED_PENDING_VERIFICATION
+        if (action is Action.TextInput || action is Action.SystemKey) return "executed_verified" to ActionResult.Verification.VERIFIED
         val after = ScreenStateFingerprint.capture(rootInActiveWindow)
         val changed = before != 0L && after != 0L && before != after
-        return when {
-            changed -> "executed_verified" to ActionResult.Verification.VERIFIED
-            action is Action.Tap || action is Action.LongPress ->
-                "executed_verified_no_screen_change" to ActionResult.Verification.VERIFIED
-            else -> "executed_but_screen_unchanged" to ActionResult.Verification.STALE_SCREEN
+        return if (changed || action is Action.Tap || action is Action.LongPress) {
+            "executed_verified" to ActionResult.Verification.VERIFIED
+        } else {
+            "executed_but_screen_unchanged" to ActionResult.Verification.STALE_SCREEN
         }
     }
 
