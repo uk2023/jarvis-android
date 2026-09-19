@@ -7,5 +7,15 @@ data class ActionResult(
     val message: String,
     val durationMs: Long = 0L,
     val strategy: String? = null,
-    val retryable: Boolean = false
-)
+    val retryable: Boolean = false,
+    val attempts: Int = 1,
+    val verification: Verification = Verification.NOT_REQUESTED
+) {
+    enum class Verification {
+        VERIFIED,
+        ACCEPTED_PENDING_VERIFICATION,
+        STALE_SCREEN,
+        NOT_REQUESTED,
+        FAILED
+    }
+}
